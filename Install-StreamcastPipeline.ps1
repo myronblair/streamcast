@@ -216,9 +216,20 @@ if ($oldService) {
 # ============================================================================
 # 5. Desktop control panel
 # ============================================================================
-$desktopBat = Join-Path ([Environment]::GetFolderPath("Desktop")) "Streamcast Control.bat"
+# Deployed to the PUBLIC desktop (C:\Users\Public\Desktop), not
+# [Environment]::GetFolderPath("Desktop") - when this script runs via
+# automation (e.g. a Proxmox/SSH guest-agent session), that resolves to the
+# automation account's own profile desktop, not the real interactive user's
+# visible desktop. Public Desktop is visible to whoever actually logs in.
+$desktopBat = "C:\Users\Public\Desktop\Streamcast Control.bat"
 $controlContent = @"
 @echo off
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Requesting administrator privileges...
+    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
 title Streamcast Control
 :menu
 cls
