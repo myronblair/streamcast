@@ -9,8 +9,8 @@
     Installs:
       - VB-Audio Virtual Cable (virtual audio device to capture app output)
       - GStreamer, via MSYS2/pacman (mingw-w64-x86_64-gstreamer + plugins base/good/
-        bad/ugly) — encodes captured audio to RTP multicast with an explicit packet
-        time (ptime), per Viking support's spec of 50ms.
+        bad/ugly) — encodes captured audio to G.711 A-law RTP multicast with an
+        explicit packet time (ptime), per Viking support's own example command.
 
         NOTE on why MSYS2 instead of the official gstreamer.freedesktop.org Windows
         .exe installer: that installer's silent-install component selection
@@ -26,6 +26,23 @@
         highest-ranked Windows capture element) — VB-Cable's "CABLE Output" shows
         up as a normal WASAPI recording device regardless of which Windows audio
         API accesses it, so this is a drop-in equivalent, not a workaround.
+
+        NOTE on codec/ptime: an earlier version of this pipeline used mulawenc
+        (G.711 u-law) + 50ms ptime, based on an initial (incorrect) read of
+        Viking's requirement. That produced persistent audio sputtering/
+        distortion that survived every buffering, exclusive-mode, and resample-
+        quality fix tried. Viking support's own example command (2026-09-18)
+        confirmed the actual spec is alawenc (A-law) + 20ms ptime + mtu=172
+        (sized for exactly one 20ms A-law frame) — switching to that fixed it
+        immediately, confirmed live against the real horn. If audio still sounds
+        wrong after a future change, suspect codec/ptime mismatch before
+        buffering/timing - it's a much more common root cause than it looks.
+
+        NOTE on network binding: udpsink must be given bind-address (set to this
+        machine's voice-VLAN IP, $VlanIp below) or Windows sends the multicast
+        traffic out its default route (the main data NIC) instead of the NIC
+        actually wired to the horn's network segment — the stream "works"
+        (GStreamer reports no errors) but zero packets ever reach the horn.
       - NSSM (wraps the pipeline as an auto-restarting Windows service)
     Then writes the actual pipeline command to C:\StreamCast\run-gstreamer.bat and
     registers an NSSM service that runs that file. A desktop shortcut/batch file
@@ -59,14 +76,25 @@
 # ============================================================================
 $MulticastAddress = "239.1.1.50"      # private multicast range 239.0.0.0/8 - avoid 224.0.0.x (reserved)
 $MulticastPort     = 5004             # must match every horn's configured multicast paging-source port
-$AudioCodec        = "mulawenc"       # G.711u - matches Viking 300TB-IP's documented supported codec
+$AudioCodec        = "alawenc"        # G.711 A-law - confirmed correct via Viking support's own example
+                                       # command 2026-09-18. An earlier attempt with mulawenc (u-law) +
+                                       # 50ms ptime produced persistent sputtering/distortion that survived
+                                       # every buffering/exclusive-mode/resample-quality fix tried - the
+                                       # real problem was codec mismatch, not a timing/buffering issue.
 $SampleRate        = 8000
 $Channels          = 1
-$PtimeNs           = 50000000         # 50ms in nanoseconds - per Viking support's spec, both min and max
+$PtimeNs           = 20000000         # 20ms in nanoseconds, both min and max - per Viking's own example
+                                       # command, confirmed working live 2026-09-18. Their example's
+                                       # mtu=172 is sized exactly for one 20ms A-law frame (160 bytes
+                                       # payload + 12-byte RTP header), included below for the same reason.
 $InstallDir        = "C:\StreamCast"
 $ServiceName       = "StreamcastGStreamer"
 $Msys2Root         = "C:\msys64"
 $GstBin            = "$Msys2Root\mingw64\bin"
+$VlanIp            = "10.48.230.4"    # this VM's IP on the voice VLAN30 NIC (the one physically
+                                       # wired to the horn's network segment) - udpsink must bind to
+                                       # this or multicast goes out the wrong interface. Verify with
+                                       # `Get-NetIPAddress` if running this on a different machine.
 
 # ============================================================================
 # 0. Sanity checks
@@ -171,20 +199,25 @@ $batContent = @"
 @echo off
 REM Streamcast audio pipeline - GStreamer (MSYS2/mingw64 build). Edit device ID,
 REM multicast address/port, or ptime below as needed.
-REM ptime is in nanoseconds - $PtimeNs = $($PtimeNs / 1000000)ms, per Viking support's spec.
+REM ptime is in nanoseconds - $PtimeNs = $($PtimeNs / 1000000)ms, and mtu=172 (sized
+REM for exactly one 20ms A-law frame: 160 bytes payload + 12-byte RTP header) -
+REM both per Viking support's own example command, confirmed working 2026-09-18.
 REM Device ID is the WASAPI endpoint ID for "CABLE Output (VB-Audio Virtual Cable)" -
 REM if VB-Cable is ever reinstalled, re-run: gst-device-monitor-1.0.exe Audio/Source
 REM and update the device= value below to match the new ID.
+REM bind-address is REQUIRED - without it, udpsink sends multicast out the OS
+REM default route (the main data NIC) instead of the voice VLAN30 NIC where the
+REM horn actually lives. Update this if the VM's VLAN30 IP ever changes.
 
 set GST_BIN=$GstBin
 set PATH=%GST_BIN%;%PATH%
 
 "%GST_BIN%\gst-launch-1.0.exe" -v ^
   wasapi2src device="$CaptureDeviceId" ^
-  ! audioconvert ! audioresample ! audio/x-raw,rate=$SampleRate,channels=$Channels ^
+  ! audioconvert ! audioresample ^
   ! $AudioCodec ^
-  ! rtppcmupay min-ptime=$PtimeNs max-ptime=$PtimeNs ^
-  ! udpsink host=$MulticastAddress port=$MulticastPort auto-multicast=true ttl-mc=1
+  ! rtppcmapay min-ptime=$PtimeNs max-ptime=$PtimeNs mtu=172 ^
+  ! udpsink host=$MulticastAddress port=$MulticastPort auto-multicast=true ttl-mc=1 bind-address=$VlanIp
 "@
 Set-Content -Path $runBat -Value $batContent -Encoding ASCII
 
