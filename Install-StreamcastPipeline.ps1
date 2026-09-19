@@ -141,14 +141,25 @@ if (Test-Path $gstLaunchExe) {
         Write-Host "[2/4a] MSYS2 base already present - skipping."
     }
 
-    Write-Host "[2/4b] Installing GStreamer + full plugin set via pacman (large download, several minutes)..."
     $env:MSYSTEM = "MSYS"
     $env:CHERE_INVOKING = "1"
     $bash = "$Msys2Root\usr\bin\bash.exe"
-    # First-pass core update (standard MSYS2 headless pattern - safe to run even
-    # when there's nothing to update, as on a fresh install).
-    & $bash -lc "pacman -Syu --noconfirm --needed" 2>&1 | Write-Host
-    & $bash -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gstreamer mingw-w64-x86_64-gst-plugins-base mingw-w64-x86_64-gst-plugins-good mingw-w64-x86_64-gst-plugins-bad mingw-w64-x86_64-gst-plugins-ugly" 2>&1 | Write-Host
+    $offlinePkgDir = Join-Path $PSScriptRoot "pacman-packages"
+    if (Test-Path $offlinePkgDir) {
+        # Fully offline install: pacman -U installs directly from local package
+        # files, no network access or repo-database sync needed at all, as long
+        # as every dependency is present as a file (which this bundle guarantees
+        # - it's the exact cache from a real online install that already worked).
+        Write-Host "[2/4b] Offline package cache found at $offlinePkgDir - installing GStreamer without network access..."
+        $winPkgDir = ($offlinePkgDir -replace '\\','/') -replace '^([A-Za-z]):', '/$1'
+        & $bash -lc "pacman -U --noconfirm $winPkgDir/*.pkg.tar.zst" 2>&1 | Write-Host
+    } else {
+        Write-Host "[2/4b] No offline package cache found - installing GStreamer + full plugin set via pacman (large download, several minutes)..."
+        # First-pass core update (standard MSYS2 headless pattern - safe to run even
+        # when there's nothing to update, as on a fresh install).
+        & $bash -lc "pacman -Syu --noconfirm --needed" 2>&1 | Write-Host
+        & $bash -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gstreamer mingw-w64-x86_64-gst-plugins-base mingw-w64-x86_64-gst-plugins-good mingw-w64-x86_64-gst-plugins-bad mingw-w64-x86_64-gst-plugins-ugly" 2>&1 | Write-Host
+    }
 
     if (-not (Test-Path $gstLaunchExe)) {
         throw "gst-launch-1.0.exe not found at $GstBin after pacman install - check the output above for errors."
